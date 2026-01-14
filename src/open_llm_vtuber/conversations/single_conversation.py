@@ -17,6 +17,7 @@ from .types import WebSocketSend
 from .tts_manager import TTSTaskManager
 from ..chat_history_manager import store_message
 from ..service_context import ServiceContext
+from ..utils.performance_monitor import PerformanceSession
 
 # Import necessary types from agent outputs
 from ..agent.output_types import SentenceOutput, AudioOutput
@@ -30,6 +31,7 @@ async def process_single_conversation(
     images: Optional[List[Dict[str, Any]]] = None,
     session_emoji: str = np.random.choice(EMOJI_LIST),
     metadata: Optional[Dict[str, Any]] = None,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> str:
     """Process a single-user conversation turn
 
@@ -46,7 +48,7 @@ async def process_single_conversation(
         str: Complete response text
     """
     # Create TTSTaskManager for this conversation
-    tts_manager = TTSTaskManager()
+    tts_manager = TTSTaskManager(perf_session=perf_session)
     full_response = ""  # Initialize full_response here
 
     try:
@@ -56,7 +58,7 @@ async def process_single_conversation(
 
         # Process user input
         input_text = await process_user_input(
-            user_input, context.asr_engine, websocket_send
+            user_input, context.asr_engine, websocket_send, perf_session=perf_session
         )
 
         # Create batch input
@@ -87,9 +89,17 @@ async def process_single_conversation(
 
         try:
             # agent.chat yields Union[SentenceOutput, Dict[str, Any]]
+            if perf_session:
+                perf_session.mark_llm_start()
             agent_output_stream = context.agent_engine.chat(batch_input)
 
+            first_output_received = False
             async for output_item in agent_output_stream:
+                # Mark LLM first token time on first output
+                if not first_output_received and perf_session:
+                    perf_session.mark_llm_first_token()
+                    first_output_received = True
+
                 if (
                     isinstance(output_item, dict)
                     and output_item.get("type") == "tool_call_status"
@@ -110,6 +120,7 @@ async def process_single_conversation(
                         websocket_send=websocket_send,  # Pass websocket_send for audio/tts messages
                         tts_manager=tts_manager,
                         translate_engine=context.translate_engine,
+                        perf_session=perf_session,
                     )
                     # Ensure response_part is treated as a string before concatenation
                     response_part_str = (
@@ -121,6 +132,10 @@ async def process_single_conversation(
                         f"Received unexpected item type from agent chat stream: {type(output_item)}"
                     )
                     logger.debug(f"Unexpected item content: {output_item}")
+
+            # Mark LLM end after stream processing completes
+            if perf_session:
+                perf_session.mark_llm_end()
 
         except Exception as e:
             logger.exception(
@@ -158,6 +173,11 @@ async def process_single_conversation(
                 avatar=context.character_config.avatar,
             )
             logger.info(f"AI response: {full_response}")
+
+        # Finalize performance monitoring
+        if perf_session:
+            perf_session.set_response_length(len(full_response))
+            perf_session.log_and_save()
 
         return full_response  # Return accumulated full_response
 

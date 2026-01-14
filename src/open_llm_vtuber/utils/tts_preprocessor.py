@@ -194,3 +194,87 @@ def filter_asterisks(text: str) -> str:
     filtered_text = re.sub(r"\s+", " ", filtered_text).strip()
 
     return filtered_text
+
+
+def filter_numbered_lists(text: str) -> str:
+    """
+    Remove numbered list patterns (e.g., "1. ", "2. ", "1)", "2)", etc.) from text.
+
+    Args:
+        text: The input string.
+
+    Returns:
+        The string with numbered list markers removed.
+    """
+    # Normalize common numbered list markers at the start of lines or segments.
+    # Examples handled:
+    #   "1. xxx", "2．xxx", "3。xxx", "4) xxx", "5、xxx", "(6) xxx", "（7）xxx"
+    # We only target markers at the beginning of a line to avoid over-stripping.
+    filtered_text = text
+
+    # Patterns like "1. " / "2．" / "3。"
+    filtered_text = re.sub(
+        r"(?m)^\s*\d+[\.．。]\s*",
+        "",
+        filtered_text,
+    )
+    # Patterns like "1) " / "2） " and "1、 "
+    filtered_text = re.sub(
+        r"(?m)^\s*\d+[)、]\s*",
+        "",
+        filtered_text,
+    )
+    # Patterns like "(1) " / "（2） "
+    filtered_text = re.sub(
+        r"(?m)^\s*[（(]\d+[）)]\s*",
+        "",
+        filtered_text,
+    )
+    # Clean up any extra spaces
+    filtered_text = re.sub(r"\s+", " ", filtered_text).strip()
+    return filtered_text
+
+
+def filter_special_formatting(text: str) -> str:
+    """
+    Remove common markdown and formatting symbols that shouldn't appear in spoken text.
+    This function preserves Live2D expression keywords in brackets.
+
+    Args:
+        text: The input string.
+
+    Returns:
+        The string with formatting symbols removed.
+    """
+    # Protect Live2D expressions [expression] patterns first
+    protected_patterns = []
+    protected_counter = 0
+
+    def protect_live2d(match):
+        nonlocal protected_counter
+        placeholder = f"__LIVE2D_PROTECT_{protected_counter}__"
+        protected_patterns.append((placeholder, match.group(0)))
+        protected_counter += 1
+        return placeholder
+
+    # Protect [expression] patterns (Live2D expressions)
+    text = re.sub(r"\[[^\]]+\]", protect_live2d, text)
+
+    # Remove standalone asterisks used for emphasis (single or multiple, but not in brackets)
+    # This removes patterns like *text*, **text**, ***text*** etc.
+    text = re.sub(r"\*{1,}((?!\*).)*?\*{1,}", "", text)
+    # Also remove standalone asterisks not in pairs
+    text = re.sub(r"(?<!\*)\*(?!\*)", "", text)
+
+    # Remove markdown headers (#, ##, ###)
+    text = re.sub(r"#{1,6}\s+", "", text)
+    # Remove markdown list markers at line start (-, +)
+    text = re.sub(r"^[-+]\s+", "", text, flags=re.MULTILINE)
+
+    # Restore protected Live2D patterns
+    for placeholder, original in protected_patterns:
+        text = text.replace(placeholder, original)
+
+    # Clean up extra spaces
+    text = re.sub(r"\s+", " ", text).strip()
+    return text

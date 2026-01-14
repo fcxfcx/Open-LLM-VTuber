@@ -1,12 +1,18 @@
-from typing import AsyncIterator, Tuple, Callable, List, Union, Dict, Any
+from typing import AsyncIterator, Tuple, Callable, List, Union, Dict, Any, Optional
 from functools import wraps
+from loguru import logger
+
 from .output_types import Actions, SentenceOutput, DisplayText
-from ..utils.tts_preprocessor import tts_filter as filter_text
+from ..utils.tts_preprocessor import (
+    tts_filter as filter_text,
+    filter_brackets,
+    filter_numbered_lists,
+    filter_special_formatting,
+)
 from ..live2d_model import Live2dModel
 from ..config_manager import TTSPreprocessorConfig
 from ..utils.sentence_divider import SentenceDivider
 from ..utils.sentence_divider import SentenceWithTags, TagState
-from loguru import logger
 
 
 def sentence_divider(
@@ -100,9 +106,13 @@ def actions_extractor(live2d_model: Live2dModel):
     return decorator
 
 
-def display_processor():
+def display_processor(live2d_model: Optional[Live2dModel] = None):
     """
     Decorator that processes text for display, passing through dicts.
+    Removes Live2D expression keywords and filters special formatting from display text.
+
+    Args:
+        live2d_model: Optional Live2D model instance for removing expression keywords
     """
 
     def decorator(
@@ -138,6 +148,18 @@ def display_processor():
                                 text = "("
                             elif tag.state == TagState.END:
                                 text = ")"
+
+                    # Remove Live2D expression keywords from display text
+                    if live2d_model:
+                        text = live2d_model.remove_emotion_keywords(text)
+
+                    # Remove any remaining bracketed segments (e.g. [expression])
+                    # from the display text so subtitles stay clean.
+                    text = filter_brackets(text)
+
+                    # Filter special formatting (asterisks, numbered lists, etc.)
+                    text = filter_numbered_lists(text)
+                    text = filter_special_formatting(text)
 
                     display = DisplayText(text=text)  # Simplified DisplayText creation
                     yield sentence, display, actions  # Yield the tuple

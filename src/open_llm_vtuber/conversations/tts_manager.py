@@ -10,13 +10,14 @@ from ..agent.output_types import DisplayText, Actions
 from ..live2d_model import Live2dModel
 from ..tts.tts_interface import TTSInterface
 from ..utils.stream_audio import prepare_audio_payload
+from ..utils.performance_monitor import PerformanceSession
 from .types import WebSocketSend
 
 
 class TTSTaskManager:
     """Manages TTS tasks and ensures ordered delivery to frontend while allowing parallel TTS generation"""
 
-    def __init__(self) -> None:
+    def __init__(self, perf_session: Optional[PerformanceSession] = None) -> None:
         self.task_list: List[asyncio.Task] = []
         self._lock = asyncio.Lock()
         # Queue to store ordered payloads
@@ -26,6 +27,8 @@ class TTSTaskManager:
         # Counter for maintaining order
         self._sequence_counter = 0
         self._next_sequence_to_send = 0
+        # Performance monitoring session
+        self.perf_session = perf_session
 
     async def speak(
         self,
@@ -106,6 +109,9 @@ class TTSTaskManager:
                 while self._next_sequence_to_send in buffered_payloads:
                     next_payload = buffered_payloads.pop(self._next_sequence_to_send)
                     await websocket_send(json.dumps(next_payload))
+                    # Mark first response time on first payload sent
+                    if self.perf_session and self._next_sequence_to_send == 0:
+                        self.perf_session.mark_first_response()
                     self._next_sequence_to_send += 1
 
                 self._payload_queue.task_done()
@@ -166,10 +172,17 @@ class TTSTaskManager:
     async def _generate_audio(self, tts_engine: TTSInterface, text: str) -> str:
         """Generate audio file from text"""
         logger.debug(f"🏃Generating audio for '''{text}'''...")
-        return await tts_engine.async_generate_audio(
-            text=text,
-            file_name_no_ext=f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}",
-        )
+        if self.perf_session:
+            self.perf_session.mark_tts_start()
+        try:
+            result = await tts_engine.async_generate_audio(
+                text=text,
+                file_name_no_ext=f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}",
+            )
+            return result
+        finally:
+            if self.perf_session:
+                self.perf_session.mark_tts_end()
 
     def clear(self) -> None:
         """Clear all pending tasks and reset state"""

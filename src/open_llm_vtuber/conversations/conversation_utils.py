@@ -14,6 +14,7 @@ from ..asr.asr_interface import ASRInterface
 from ..live2d_model import Live2dModel
 from ..tts.tts_interface import TTSInterface
 from ..utils.stream_audio import prepare_audio_payload
+from ..utils.performance_monitor import PerformanceSession
 
 
 # Convert class methods to standalone functions
@@ -50,6 +51,7 @@ async def process_agent_output(
     websocket_send: WebSocketSend,
     tts_manager: TTSTaskManager,
     translate_engine: Optional[Any] = None,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> str:
     """Process agent output with character information and optional translation"""
     output.display_text.name = character_config.character_name
@@ -65,9 +67,12 @@ async def process_agent_output(
                 websocket_send,
                 tts_manager,
                 translate_engine,
+                perf_session=perf_session,
             )
         elif isinstance(output, AudioOutput):
-            full_response = await handle_audio_output(output, websocket_send)
+            full_response = await handle_audio_output(
+                output, websocket_send, perf_session=perf_session
+            )
         else:
             logger.warning(f"Unknown output type: {type(output)}")
     except Exception as e:
@@ -88,6 +93,7 @@ async def handle_sentence_output(
     websocket_send: WebSocketSend,
     tts_manager: TTSTaskManager,
     translate_engine: Optional[Any] = None,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> str:
     """Handle sentence output type with optional translation support"""
     full_response = ""
@@ -116,9 +122,11 @@ async def handle_sentence_output(
 async def handle_audio_output(
     output: AudioOutput,
     websocket_send: WebSocketSend,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> str:
     """Process and send AudioOutput directly to the client"""
     full_response = ""
+    first_audio_sent = False
     async for audio_path, display_text, transcript, actions in output:
         full_response += transcript
         audio_payload = prepare_audio_payload(
@@ -127,6 +135,10 @@ async def handle_audio_output(
             actions=actions.to_dict() if actions else None,
         )
         await websocket_send(json.dumps(audio_payload))
+        # Mark first response time on first audio sent
+        if not first_audio_sent and perf_session:
+            perf_session.mark_first_response()
+            first_audio_sent = True
     return full_response
 
 
@@ -147,11 +159,16 @@ async def process_user_input(
     user_input: Union[str, np.ndarray],
     asr_engine: ASRInterface,
     websocket_send: WebSocketSend,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> str:
     """Process user input, converting audio to text if needed"""
     if isinstance(user_input, np.ndarray):
         logger.info("Transcribing audio input...")
+        if perf_session:
+            perf_session.mark_asr_start()
         input_text = await asr_engine.async_transcribe_np(user_input)
+        if perf_session:
+            perf_session.mark_asr_end()
         await websocket_send(
             json.dumps({"type": "user-input-transcription", "text": input_text})
         )

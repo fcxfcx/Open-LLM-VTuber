@@ -9,11 +9,23 @@ from loguru import logger
 from ..chat_group import ChatGroupManager
 from ..chat_history_manager import store_message
 from ..service_context import ServiceContext
+from ..utils.performance_monitor import PerformanceMonitor
 from .group_conversation import process_group_conversation
 from .single_conversation import process_single_conversation
 from .conversation_utils import EMOJI_LIST
 from .types import GroupConversationState
 from prompts import prompt_loader
+
+# Global performance monitor instance
+_performance_monitor: Optional[PerformanceMonitor] = None
+
+
+def get_performance_monitor() -> PerformanceMonitor:
+    """Get or create the global performance monitor instance."""
+    global _performance_monitor
+    if _performance_monitor is None:
+        _performance_monitor = PerformanceMonitor()
+    return _performance_monitor
 
 
 async def handle_conversation_trigger(
@@ -71,6 +83,32 @@ async def handle_conversation_trigger(
     images = data.get("images")
     session_emoji = np.random.choice(EMOJI_LIST)
 
+    # Create performance monitoring session
+    monitor = get_performance_monitor()
+    perf_session = monitor.create_session(f"{client_uid}_{session_emoji}")
+
+    # Mark request reception time (when message arrived at server)
+    # Use server receive time if available, otherwise use current time
+    import time
+
+    server_receive_time = data.get("_server_receive_time")
+    if server_receive_time:
+        # Set start_time as server receive time (approximate client send time)
+        # Note: Without client-side timestamp, we can't measure true network latency
+        # This will show ~0ms for localhost and small values for LAN
+        perf_session.start_time = server_receive_time
+        # Request reception time is when we start processing (slightly after receive)
+        perf_session.request_reception_time = time.perf_counter()
+    else:
+        # Fallback: use current time
+        perf_session.mark_request_received()
+
+    # Set user input length for monitoring
+    if isinstance(user_input, str):
+        perf_session.set_user_input_length(len(user_input))
+    elif isinstance(user_input, np.ndarray):
+        perf_session.set_user_input_length(len(user_input))
+
     group = chat_group_manager.get_client_group(client_uid)
     if group and len(group.members) > 1:
         # Use group_id as task key for group conversations
@@ -92,6 +130,7 @@ async def handle_conversation_trigger(
                     images=images,
                     session_emoji=session_emoji,
                     metadata=metadata,
+                    perf_session=perf_session,
                 )
             )
     else:
@@ -105,6 +144,7 @@ async def handle_conversation_trigger(
                 images=images,
                 session_emoji=session_emoji,
                 metadata=metadata,
+                perf_session=perf_session,
             )
         )
 

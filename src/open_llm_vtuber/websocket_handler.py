@@ -215,6 +215,10 @@ class WebSocketHandler:
             while True:
                 try:
                     data = await websocket.receive_json()
+                    # Record server receive time for performance monitoring
+                    import time
+
+                    data["_server_receive_time"] = time.perf_counter()
                     message_handler.handle_message(client_uid, data)
                     await self._route_message(websocket, client_uid, data)
                 except WebSocketDisconnect:

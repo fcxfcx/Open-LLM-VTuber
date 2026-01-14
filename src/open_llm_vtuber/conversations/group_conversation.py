@@ -23,6 +23,7 @@ from .types import (
 )
 from ..service_context import ServiceContext
 from ..chat_history_manager import store_message
+from ..utils.performance_monitor import PerformanceSession
 from .tts_manager import TTSTaskManager
 
 
@@ -36,6 +37,7 @@ async def process_group_conversation(
     images: Optional[List[Dict[str, Any]]] = None,
     session_emoji: str = np.random.choice(EMOJI_LIST),
     metadata: Optional[Dict[str, Any]] = None,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> None:
     """Process group conversation
 
@@ -51,7 +53,9 @@ async def process_group_conversation(
         metadata: Optional metadata for special processing flags
     """
     # Create TTSTaskManager for each member
-    tts_managers = {uid: TTSTaskManager() for uid in group_members}
+    tts_managers = {
+        uid: TTSTaskManager(perf_session=perf_session) for uid in group_members
+    }
 
     try:
         logger.info(f"Group Conversation Chain {session_emoji} started!")
@@ -85,6 +89,7 @@ async def process_group_conversation(
             broadcast_func=broadcast_func,
             group_members=group_members,
             initiator_client_uid=initiator_client_uid,
+            perf_session=perf_session,
         )
 
         # Check if we should skip storing this input to history
@@ -146,6 +151,9 @@ async def process_group_conversation(
         )
         raise
     finally:
+        # Finalize performance monitoring
+        if perf_session:
+            perf_session.log_and_save()
         # Cleanup all TTS managers
         for tts_manager in tts_managers.values():
             cleanup_conversation(tts_manager, session_emoji)
@@ -195,10 +203,14 @@ async def process_group_input(
     broadcast_func: BroadcastFunc,
     group_members: List[str],
     initiator_client_uid: str,
+    perf_session: Optional[PerformanceSession] = None,
 ) -> str:
     """Process and broadcast user input to group"""
     input_text = await process_user_input(
-        user_input, initiator_context.asr_engine, initiator_ws_send
+        user_input,
+        initiator_context.asr_engine,
+        initiator_ws_send,
+        perf_session=perf_session,
     )
     await broadcast_transcription(
         broadcast_func, group_members, input_text, initiator_client_uid
@@ -351,9 +363,21 @@ async def process_member_response(
 
     try:
         # agent.chat now yields Union[SentenceOutput, Dict[str, Any]]
+        perf_session = (
+            tts_manager.perf_session
+            if hasattr(tts_manager, "perf_session")
+            else None
+        )
+        if perf_session:
+            perf_session.mark_llm_start()
         agent_output_stream = context.agent_engine.chat(batch_input)
 
+        first_output_received = False
         async for output_item in agent_output_stream:
+            # Mark LLM first token time on first output
+            if not first_output_received and perf_session:
+                perf_session.mark_llm_first_token()
+                first_output_received = True
             if (
                 isinstance(output_item, dict)
                 and output_item.get("type") == "tool_call_status"
@@ -376,12 +400,19 @@ async def process_member_response(
                     websocket_send=current_ws_send,  # Send TTS/display text directly to speaker's client
                     tts_manager=tts_manager,
                     translate_engine=context.translate_engine,
+                    perf_session=tts_manager.perf_session
+                    if hasattr(tts_manager, "perf_session")
+                    else None,
                 )
                 full_response += response_part  # Accumulate text response
             else:
                 logger.warning(
                     f"Received unexpected item type from agent chat stream: {type(output_item)}"
                 )
+
+        # Mark LLM end after stream processing completes
+        if perf_session:
+            perf_session.mark_llm_end()
 
     except Exception as e:
         logger.exception(f"Error processing group member response stream: {e}")

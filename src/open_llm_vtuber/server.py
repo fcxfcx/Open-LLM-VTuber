@@ -86,6 +86,7 @@ class WebSocketServer:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            allow_origin_regex="https?://.*"
         )
 
         # Include routes, passing the context instance
